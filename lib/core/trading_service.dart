@@ -22,7 +22,12 @@ class Session {
     required this.accountType,
     required this.sessionType,
     this.name = '',
+    this.refreshToken = '',
+    this.source = 'server',
   });
+
+  /// 'server' = FP Trades account, 'mq' = MetaQuotes demo ka trading account.
+  final String source;
 
   final String token;
   final String accountId;
@@ -33,13 +38,33 @@ class Session {
   /// Account holder ka naam (sidebar me number ki jagah dikhta hai).
   final String name;
 
+  /// Long-lived (30 din) refresh token — access token (12h) expire
+  /// hone pe app isse chup chaap naya session le leta hai. Purane
+  /// stored sessions me ye khali hoga; wo ek baar logout honge.
+  final String refreshToken;
+
+  Session copyWith({String? token, String? refreshToken, String? name}) {
+    return Session(
+      token: token ?? this.token,
+      accountId: accountId,
+      accountNumber: accountNumber,
+      accountType: accountType,
+      sessionType: sessionType,
+      name: name ?? this.name,
+      refreshToken: refreshToken ?? this.refreshToken,
+      source: source,
+    );
+  }
+
   Map<String, dynamic> toJson() => {
+    'source': source,
     'token': token,
     'accountId': accountId,
     'accountNumber': accountNumber,
     'accountType': accountType,
     'sessionType': sessionType,
     'name': name,
+    'refreshToken': refreshToken,
   };
 
   factory Session.fromJson(Map<String, dynamic> j) => Session(
@@ -49,6 +74,63 @@ class Session {
     accountType: j['accountType'] as String? ?? '',
     sessionType: j['sessionType'] as String? ?? 'TRADE',
     name: j['name'] as String? ?? '',
+    refreshToken: j['refreshToken'] as String? ?? '',
+    source: j['source'] as String? ?? 'server',
+  );
+}
+
+/// Phone me yaad rakha hua FP Trades account (Manage Accounts card).
+/// Password sirf tab hota hai jab login pe "Save password" ON tha.
+class SavedFpAccount {
+  const SavedFpAccount({
+    required this.accountNumber,
+    this.name = '',
+    this.accountType = '',
+    this.password = '',
+    this.balance = 0,
+    this.lastLogin,
+  });
+
+  final String accountNumber;
+  final String name;
+  final String accountType;
+  final String password;
+  final double balance;
+  final DateTime? lastLogin;
+
+  bool get isDemo => accountType.toLowerCase().contains('demo');
+
+  SavedFpAccount copyWith({
+    String? name,
+    String? accountType,
+    String? password,
+    double? balance,
+    DateTime? lastLogin,
+  }) => SavedFpAccount(
+    accountNumber: accountNumber,
+    name: name ?? this.name,
+    accountType: accountType ?? this.accountType,
+    password: password ?? this.password,
+    balance: balance ?? this.balance,
+    lastLogin: lastLogin ?? this.lastLogin,
+  );
+
+  Map<String, dynamic> toJson() => {
+    'accountNumber': accountNumber,
+    'name': name,
+    'accountType': accountType,
+    'password': password,
+    'balance': balance,
+    'lastLogin': lastLogin?.toIso8601String(),
+  };
+
+  factory SavedFpAccount.fromJson(Map<String, dynamic> j) => SavedFpAccount(
+    accountNumber: '${j['accountNumber'] ?? ''}',
+    name: '${j['name'] ?? ''}',
+    accountType: '${j['accountType'] ?? ''}',
+    password: '${j['password'] ?? ''}',
+    balance: (j['balance'] as num?)?.toDouble() ?? 0,
+    lastLogin: DateTime.tryParse('${j['lastLogin'] ?? ''}'),
   );
 }
 
@@ -57,6 +139,10 @@ int digitsFor(String symbol, double price) {
   if (s.contains('JPY') || s.contains('RUB')) return 3;
   if (s.contains('XAU') || s.contains('GOLD')) return 2;
   if (s.contains('XAG') || s.contains('SILVER')) return 3;
+  // MT5 har symbol ki apni digits use karta hai: BTC/indices
+  // jaisi badi कीमतon pe 2, warna EURUSD jaiso pe 5.
+  if (price >= 1000) return 2;
+  if (price >= 100) return 3;
   return 5;
 }
 
@@ -95,6 +181,7 @@ class LiveQuote {
 class LivePosition {
   const LivePosition({
     required this.positionId,
+    this.ticket,
     required this.symbol,
     required this.side,
     required this.volume,
@@ -109,6 +196,7 @@ class LivePosition {
   });
 
   final String positionId;
+  final int? ticket;
   final String symbol;
   final String side; // BUY / SELL
   final double volume;
@@ -125,6 +213,7 @@ class LivePosition {
 
   factory LivePosition.fromWs(Map<String, dynamic> j) => LivePosition(
     positionId: '${j['positionId'] ?? j['orderId'] ?? ''}',
+    ticket: (j['ticket'] as num?)?.toInt(),
     symbol: '${j['symbol'] ?? ''}',
     side: '${j['side'] ?? 'BUY'}',
     volume: _d(j['volume'] ?? j['qty']),
@@ -142,33 +231,47 @@ class LivePosition {
 class PendingOrder {
   const PendingOrder({
     required this.orderId,
+    this.ticket,
     required this.symbol,
     required this.side,
     required this.orderType,
     required this.volume,
+    this.filledVolume = 0,
     required this.price,
     this.stopLoss,
     this.takeProfit,
+    this.createdAt,
+    this.currentPrice,
   });
 
   final String orderId;
+  final int? ticket;
   final String symbol;
   final String side;
   final String orderType;
   final double volume;
+  final double filledVolume;
   final double price;
   final double? stopLoss;
   final double? takeProfit;
+  final DateTime? createdAt;
+  final double? currentPrice;
+
+  bool get isBuy => side == 'BUY';
 
   factory PendingOrder.fromWs(Map<String, dynamic> j) => PendingOrder(
     orderId: '${j['orderId'] ?? j['positionId'] ?? ''}',
+    ticket: (j['ticket'] as num?)?.toInt(),
     symbol: '${j['symbol'] ?? ''}',
     side: '${j['side'] ?? 'BUY'}',
     orderType: '${j['orderType'] ?? ''}',
     volume: _d(j['volume'] ?? j['qty']),
+    filledVolume: _d(j['filledVolume'] ?? j['volumeFilled']),
     price: _d(j['price'] ?? j['openPrice']),
     stopLoss: j['stopLoss'] == null ? null : _d(j['stopLoss']),
     takeProfit: j['takeProfit'] == null ? null : _d(j['takeProfit']),
+    createdAt: _date(j['createdAt'] ?? j['openTime']),
+    currentPrice: j['currentPrice'] == null ? null : _d(j['currentPrice']),
   );
 }
 
@@ -239,12 +342,13 @@ class TradingService extends ChangeNotifier {
   Session? session;
   bool get isLoggedIn => session != null;
 
-  // MetaQuotes demo account (Brokers -> MetaQuotes Ltd.). When set,
-  // the user counts as logged in across the app (Accounts card,
-  // sidebar profile, no "Add Trading Account" placeholders), even
-  // though no server trading session exists for it.
+  // MetaQuotes demo account (Brokers -> MetaQuotes Ltd.) - profile.
+  // Iska apna server trading account hai; active hone par [session]
+  // usi ka hota hai (source 'mq'), FP ka nahi.
   Map<String, dynamic>? mqAccount;
-  bool get mqLoggedIn => mqAccount != null;
+  bool get mqLoggedIn => activeSource == 'mq' && mqAccount != null;
+
+  /// Koi account active hai (warna app logged-out screens dikhata hai).
   bool get hasAnyAccount => isLoggedIn || mqLoggedIn;
 
   /// Sabse last me login kiya hua account source: 'server'
@@ -253,6 +357,13 @@ class TradingService extends ChangeNotifier {
   /// warna purana MQ account chipka rehta tha aur FP login
   /// dikhai hi nahi deta tha.
   String activeSource = '';
+
+  /// Saare FP Trades accounts jinme kabhi login hua (naya pehle).
+  List<SavedFpAccount> fpAccounts = const [];
+  static const _fpAccountsKey = 'fp_saved_accounts';
+
+  /// User ne khud FP logout kiya - tab tak chup chaap dobara login nahi.
+  bool loggedOutByUser = false;
 
   final quotes = <String, LiveQuote>{};
   final positions = <String, LivePosition>{};
@@ -264,7 +375,7 @@ class TradingService extends ChangeNotifier {
   String? lastError;
 
   final _subs = <String, String>{}; // symbol -> market
-  final _ticks = <String, List<(DateTime, double)>>{};
+  final _ticks = <String, List<(DateTime, double, double)>>{};
   WebSocket? _ws;
   Timer? _reconnect;
   bool _closed = false;
@@ -290,6 +401,10 @@ class TradingService extends ChangeNotifier {
     }
     activeSource =
         prefs.getString('active_source') ?? (mqAccount != null ? 'mq' : '');
+    fpAccounts = [
+      for (final raw in prefs.getStringList(_fpAccountsKey) ?? const [])
+        ?_decodeFp(raw),
+    ];
     final raw = prefs.getString('session');
     if (raw != null) {
       try {
@@ -297,56 +412,110 @@ class TradingService extends ChangeNotifier {
       } catch (_) {}
     }
     if (session != null) {
-      // Purane saved session me naam nahi hota tha - profile
-      // API se bhar lo (sidebar me number ki jagah naam ke liye).
-      if (session!.name.isEmpty) unawaited(_fillSessionName());
-      connectWs();
-      unawaited(refreshAccount());
-      unawaited(refreshWatchlist());
-    } else {
-      // No login screen: silently sign in with the default account.
-      // Ye auto-login hai - last-active source nahi badlega.
-      try {
-        await login(
-          ApiConfig.defaultAccountNumber,
-          ApiConfig.defaultPassword,
-          activate: false,
-        );
-      } catch (e) {
-        lastError = '$e';
+      // Stored session pehle server se validate karo: expire hai
+      // to refresh hoga, invalid hai to force-logout (neeche wala
+      // logged-out state). Valid ho tabhi WS + data chalega.
+      await _validateSession();
+      if (session != null) {
+        // Purane installs: chalu FP session ka card bhi list me aa jaye.
+        if (session!.source == 'server') await _rememberFp();
+        connectWs();
+        unawaited(refreshAccount());
+        unawaited(refreshWatchlist());
       }
     }
+    // Session nahi (ya expire): sirf ACTIVE account (FP ya MQ) ke saved
+    // password se dobara login. Koi active account nahi = logged out.
+    if (session == null) await ensureSession();
     notifyListeners();
   }
 
-  Future<void> login(
-    String accountNumber,
-    String password, {
-    bool activate = true,
+  static SavedFpAccount? _decodeFp(String raw) {
+    try {
+      final d = jsonDecode(raw);
+      if (d is Map<String, dynamic>) {
+        final a = SavedFpAccount.fromJson(d);
+        return a.accountNumber.isEmpty ? null : a;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  Future<void> _saveFpAccounts() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_fpAccountsKey, [
+      for (final a in fpAccounts) jsonEncode(a.toJson()),
+    ]);
+  }
+
+  /// Chalu session wala account list me jodo / update karo (sabse upar).
+  /// [password] null = purana saved password rehne do.
+  Future<void> _rememberFp({String? password, bool touch = false}) async {
+    final s = session;
+    if (s == null) return;
+    final old = fpAccounts
+        .where((a) => a.accountNumber == s.accountNumber)
+        .firstOrNull;
+    final updated = (old ?? SavedFpAccount(accountNumber: s.accountNumber))
+        .copyWith(
+          name: s.name.isNotEmpty ? s.name : null,
+          accountType: s.accountType.isNotEmpty ? s.accountType : null,
+          password: password,
+          lastLogin: touch || old == null ? DateTime.now() : null,
+        );
+    fpAccounts = [
+      updated,
+      for (final a in fpAccounts)
+        if (a.accountNumber != s.accountNumber) a,
+    ];
+    await _saveFpAccounts();
+  }
+
+  Future<void> removeFpAccount(String accountNumber) async {
+    fpAccounts = [
+      for (final a in fpAccounts)
+        if (a.accountNumber != accountNumber) a,
+    ];
+    await _saveFpAccounts();
+    notifyListeners();
+  }
+
+  /// Sidebar / Accounts me kaunsa account upar (active) dikhe.
+  Future<void> setActiveSource(String source) async {
+    activeSource = source;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('active_source', source);
+    notifyListeners();
+  }
+
+  /// Login response (FP account-auth ya MQ demo ka `session`) se naya
+  /// trading session chalu karo. Dusre account pe switch ho to purane
+  /// account ki positions/orders/WS saaf - mix nahi honge.
+  Future<void> _startSession(
+    Map<String, dynamic> data, {
+    required String source,
+    required String fallbackNumber,
   }) async {
-    final data = await _request(
-      'POST',
-      '/v1/account-auth/login',
-      auth: false,
-      body: {'account_number': accountNumber.trim(), 'password': password},
-    );
     final token = data['tradeToken'] as String?;
     if (token == null) throw ApiException('Login failed: no token');
-    session = Session(
+    final next = Session(
       token: token,
       accountId: '${data['accountId'] ?? ''}',
-      accountNumber: '${data['account_number'] ?? accountNumber}',
+      accountNumber: '${data['account_number'] ?? fallbackNumber}',
       accountType: '${data['account_type'] ?? ''}',
       sessionType: '${data['sessionType'] ?? 'TRADE'}',
       name: '${data['name'] ?? ''}',
+      refreshToken: '${data['refreshToken'] ?? ''}',
+      source: source,
     );
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('session', jsonEncode(session!.toJson()));
-    if (activate) {
-      // FP Trades login ab sabse upar wala (active) account hai.
-      activeSource = 'server';
-      await prefs.setString('active_source', activeSource);
+    if (session != null && session!.accountId != next.accountId) {
+      disconnectWs();
+      _clearAccountState();
     }
+    session = next;
+    loggedOutByUser = false;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('session', jsonEncode(next.toJson()));
     notifyListeners();
     // WebSocket connects only now that we are logged in.
     connectWs();
@@ -355,44 +524,156 @@ class TradingService extends ChangeNotifier {
     unawaited(refreshWatchlist());
   }
 
-  /// Session me account holder ka naam profile API se bharo
-  /// (purane sessions jinme naam save nahi hua tha).
-  Future<void> _fillSessionName() async {
-    final s = session;
-    if (s == null) return;
-    try {
-      final data = await _request('GET', '/v1/account-auth/me');
-      final name = '${data['name'] ?? ''}'.trim();
-      if (name.isEmpty || session == null) return;
-      session = Session(
-        token: s.token,
-        accountId: s.accountId,
-        accountNumber: s.accountNumber,
-        accountType: s.accountType,
-        sessionType: s.sessionType,
-        name: name,
-      );
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('session', jsonEncode(session!.toJson()));
-      notifyListeners();
-    } catch (_) {
-      // Naam na mile to sidebar number hi dikhayega - koi baat nahi.
-    }
-  }
-
-  Future<void> logout() async {
-    session = null;
-    // Logged out: WebSocket band - koi live feed connection nahi.
-    disconnectWs();
+  void _clearAccountState() {
     positions.clear();
     pendings.clear();
     account = const LiveAccount();
     accountLoaded = false;
+  }
+
+  /// FP Trades account login (account-auth).
+  Future<void> login(
+    String accountNumber,
+    String password, {
+    bool activate = true,
+    bool savePassword = true,
+  }) async {
+    final data = await _request(
+      'POST',
+      '/v1/account-auth/login',
+      auth: false,
+      body: {'account_number': accountNumber.trim(), 'password': password},
+    );
+    await _startSession(data, source: 'server', fallbackNumber: accountNumber);
+    // Har FP login Manage Accounts list me save (dusra login karne par
+    // bhi card gayab nahi hoga).
+    await _rememberFp(password: savePassword ? password : '', touch: true);
+    if (activate) {
+      // FP Trades login ab sabse upar wala (active) account hai.
+      await setActiveSource('server');
+    }
+  }
+
+  Future<bool>? _ensuring;
+
+  /// Session na ho (app start pe server band tha, ya refresh fail hua) to
+  /// ACTIVE account (FP ya MQ) ke saved password se chup chaap dobara
+  /// login. Koi active account / password nahi = false (logged out).
+  Future<bool> ensureSession() {
+    if (session != null) return Future.value(true);
+    if (loggedOutByUser) return Future.value(false);
+    return _ensuring ??= () async {
+      try {
+        final mq = mqAccount;
+        final mqPass = '${mq?['password'] ?? ''}';
+        if (activeSource == 'mq' && mq != null && mqPass.isNotEmpty) {
+          await loginMetaQuotesDemo(
+            type: 'TRADE_ACCOUNT',
+            identifier: '${mq['login_id']}',
+            password: mqPass,
+          );
+        } else if (activeSource == 'server') {
+          final saved = fpAccounts
+              .where((a) => a.password.isNotEmpty)
+              .firstOrNull;
+          if (saved != null) {
+            await login(saved.accountNumber, saved.password, activate: false);
+          }
+        }
+      } catch (e) {
+        lastError = '$e';
+      }
+      return session != null;
+    }().whenComplete(() => _ensuring = null);
+  }
+
+  /// Stored session ko server se validate karo (app start pe).
+  /// Token expire ho to _request khud refresh token se naya le
+  /// lega; refresh bhi fail ho to wahi force-logout kar dega aur
+  /// session null ho jayega. Server unreachable ho to session
+  /// rakha rahega (offline me logout nahi karna).
+  Future<bool> _validateSession() async {
+    try {
+      final data = await _request('GET', '/v1/account-auth/me');
+      final name = '${data['name'] ?? ''}'.trim();
+      if (name.isNotEmpty && session != null && session!.name != name) {
+        session = session!.copyWith(name: name);
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('session', jsonEncode(session!.toJson()));
+        notifyListeners();
+      }
+    } catch (_) {
+      // 401 wala case _request/logout sambhal chuka hoga; network
+      // error pe session rehne do.
+    }
+    return session != null;
+  }
+
+  Future<bool>? _refreshing;
+
+  /// Access token expire (401) hone pe refresh token se naya
+  /// session lo. Parallel requests ek hi refresh share karte hain.
+  Future<bool> _refreshSession() {
+    return _refreshing ??= _doRefresh().whenComplete(() {
+      _refreshing = null;
+    });
+  }
+
+  Future<bool> _doRefresh() async {
+    final s = session;
+    if (s == null || s.refreshToken.isEmpty) return false;
+    try {
+      final data = await _request(
+        'POST',
+        '/v1/account-auth/refresh',
+        auth: false,
+        body: {'refreshToken': s.refreshToken},
+      );
+      final token = data['tradeToken'] as String?;
+      if (token == null || session == null) return false;
+      final name = '${data['name'] ?? ''}'.trim();
+      session = session!.copyWith(
+        token: token,
+        refreshToken: '${data['refreshToken'] ?? s.refreshToken}',
+        name: name.isNotEmpty ? name : null,
+      );
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('session', jsonEncode(session!.toJson()));
+      _identify();
+      notifyListeners();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// [byUser] = user ne khud logout dabaya (token expire wala nahi).
+  /// User logout = koi account active nahi -> logged-out screens.
+  /// Token-expire wala logout ([byUser] false) active account rakhta hai
+  /// taaki saved password se dobara login ho sake.
+  Future<void> logout({bool byUser = true}) async {
+    final wasMq = session?.source == 'mq';
+    session = null;
+    // Logged out: WebSocket band - koi live feed connection nahi.
+    disconnectWs();
+    _clearAccountState();
+    // Purani prices bhi saaf - warna logout ke baad bhi order
+    // screen / quotes me freeze hue "live" price dikhte rehte the.
+    quotes.clear();
+    _subs.clear();
+    _ticks.clear();
     watchlist = const [];
-    activeSource = mqAccount != null ? 'mq' : '';
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('session');
-    await prefs.setString('active_source', activeSource);
+    if (byUser) {
+      loggedOutByUser = true;
+      if (wasMq || activeSource == 'mq') {
+        mqAccount = null;
+        await prefs.remove('mq_active_account');
+      }
+      activeSource = '';
+      await prefs.setString('active_source', activeSource);
+    }
     notifyListeners();
   }
 
@@ -403,6 +684,9 @@ class TradingService extends ChangeNotifier {
   ) =>
       _request('POST', '/v1/metaquotes/demo/register', auth: false, body: body);
 
+  /// MQ demo login: server pe us demo ka apna trading account hai -
+  /// usi ka session chalu hota hai (trades, positions, History sab
+  /// isi account ke). Purane local-only data ke saath merge hota hai.
   Future<Map<String, dynamic>> loginMetaQuotesDemo({
     required String type,
     required String identifier,
@@ -414,8 +698,22 @@ class TradingService extends ChangeNotifier {
       auth: false,
       body: {'type': type, 'identifier': identifier, 'password': password},
     );
-    // Successful MQ login activates the account across the app.
+    final sessionData = profile.remove('session');
+    if (sessionData is! Map<String, dynamic>) {
+      throw ApiException('Login failed: trading account not available');
+    }
+    await _startSession(
+      sessionData,
+      source: 'mq',
+      fallbackNumber: '${profile['login_id'] ?? identifier}',
+    );
+    final local =
+        mqAccount != null &&
+            '${mqAccount!['login_id']}' == '${profile['login_id']}'
+        ? mqAccount!
+        : const <String, dynamic>{};
     await setMqAccount({
+      ...local,
       ...profile,
       'email': profile['email'] ?? identifier,
       'password': password,
@@ -423,20 +721,143 @@ class TradingService extends ChangeNotifier {
     return profile;
   }
 
-  /// Sets (or clears, with null) the active MetaQuotes account and
-  /// persists it locally; listeners rebuild (sidebar, screens).
+  /// Active MetaQuotes account set karo (ya null = MQ logout) aur
+  /// locally persist; listeners rebuild (sidebar, screens).
   Future<void> setMqAccount(Map<String, dynamic>? account) async {
-    mqAccount = account;
-    // MQ account active kiya to wahi upar wala account banega;
-    // hataya to server session (agar hai) upar aa jayega.
-    activeSource = account != null ? 'mq' : (session != null ? 'server' : '');
-    final prefs = await SharedPreferences.getInstance();
     if (account == null) {
+      if (session?.source == 'mq' || activeSource == 'mq') {
+        // MQ ka trading session bhi band -> logged-out screen.
+        await logout();
+        return;
+      }
+      mqAccount = null;
+      final prefs = await SharedPreferences.getInstance();
       await prefs.remove('mq_active_account');
-    } else {
-      await prefs.setString('mq_active_account', jsonEncode(account));
+      notifyListeners();
+      return;
     }
+    mqAccount = account;
+    activeSource = 'mq';
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('mq_active_account', jsonEncode(account));
     await prefs.setString('active_source', activeSource);
+    await _upsertSavedMq(account);
+    notifyListeners();
+  }
+
+  // ---------------- saved accounts (Manage Accounts) ----------------
+
+  static const _mqListKey = 'mq_created_accounts';
+
+  /// Phone me saved saare MetaQuotes demo accounts.
+  Future<List<Map<String, dynamic>>> savedMqAccounts() async {
+    final prefs = await SharedPreferences.getInstance();
+    return [
+      for (final raw in prefs.getStringList(_mqListKey) ?? const [])
+        ?_decodeMap(raw),
+    ];
+  }
+
+  static Map<String, dynamic>? _decodeMap(String raw) {
+    try {
+      final d = jsonDecode(raw);
+      return d is Map<String, dynamic> ? d : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _writeSavedMq(List<Map<String, dynamic>> list) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_mqListKey, [
+      for (final a in list) jsonEncode(a),
+    ]);
+  }
+
+  /// MQ account list me jodo / update (login se aaya ho to bhi card bane).
+  Future<void> _upsertSavedMq(Map<String, dynamic> account) async {
+    final id = '${account['login_id']}';
+    final list = await savedMqAccounts();
+    final i = list.indexWhere((a) => '${a['login_id']}' == id);
+    if (i >= 0) {
+      list[i] = {...list[i], ...account};
+    } else {
+      list.add(account);
+    }
+    await _writeSavedMq(list);
+  }
+
+  /// MQ account list se hatao (active ho to logout bhi).
+  Future<void> forgetMqAccount(String loginId) async {
+    final list = await savedMqAccounts();
+    list.removeWhere((a) => '${a['login_id']}' == loginId);
+    await _writeSavedMq(list);
+    if ('${mqAccount?['login_id']}' == loginId) {
+      await setMqAccount(null);
+    }
+    notifyListeners();
+  }
+
+  /// Active account ka saved password phone se hatao (dobara login pe
+  /// password puchha jayega).
+  Future<void> clearSavedPassword() async {
+    if (mqLoggedIn) {
+      final id = '${mqAccount!['login_id']}';
+      mqAccount = {...mqAccount!}..remove('password');
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('mq_active_account', jsonEncode(mqAccount));
+      final list = await savedMqAccounts();
+      for (final a in list) {
+        if ('${a['login_id']}' == id) a.remove('password');
+      }
+      await _writeSavedMq(list);
+    } else if (session?.source == 'server') {
+      _setFpPassword(session!.accountNumber, '');
+      await _saveFpAccounts();
+    }
+    notifyListeners();
+  }
+
+  void _setFpPassword(String accountNumber, String password) {
+    fpAccounts = [
+      for (final a in fpAccounts)
+        a.accountNumber == accountNumber ? a.copyWith(password: password) : a,
+    ];
+  }
+
+  /// MT5 Change password: kind = master / investor / trader / money_manager.
+  /// Master badla to phone ka saved password bhi naya.
+  Future<void> changePassword({
+    required String kind,
+    required String currentPassword,
+    required String newPassword,
+  }) async {
+    await _request(
+      'POST',
+      '/v1/account-auth/change-password',
+      body: {
+        'kind': kind,
+        'currentPassword': currentPassword,
+        'newPassword': newPassword,
+      },
+    );
+    if (kind != 'master') return;
+    if (session?.source == 'mq' && mqAccount != null) {
+      final updated = {...mqAccount!, 'password': newPassword};
+      mqAccount = updated;
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('mq_active_account', jsonEncode(updated));
+      await _upsertSavedMq(updated);
+    } else if (session?.source == 'server') {
+      final saved = fpAccounts
+          .where((a) => a.accountNumber == session!.accountNumber)
+          .firstOrNull;
+      // Pehle se password saved tha tabhi naya save karo.
+      if (saved != null && saved.password.isNotEmpty) {
+        _setFpPassword(saved.accountNumber, newPassword);
+        await _saveFpAccounts();
+      }
+    }
     notifyListeners();
   }
 
@@ -448,6 +869,7 @@ class TradingService extends ChangeNotifier {
     Map<String, dynamic>? body,
     Map<String, String>? query,
     bool auth = true,
+    bool retried = false,
   }) async {
     final uri = Uri.parse(
       '${ApiConfig.httpBase}$path',
@@ -469,6 +891,28 @@ class TradingService extends ChangeNotifier {
         if (decoded is Map<String, dynamic>) data = decoded;
       } catch (_) {}
       if (resp.statusCode >= 400) {
+        // Access token expire/invalid: ek baar refresh token se
+        // chup chaap naya session lo aur request dobara bhejo.
+        // Refresh bhi fail ho jaye to pura force-logout — app
+        // aadhi logged-in haalat me nahi atkega.
+        if (resp.statusCode == 401 &&
+            auth &&
+            !retried &&
+            session != null &&
+            !path.contains('/account-auth/')) {
+          if (await _refreshSession()) {
+            return _request(
+              method,
+              path,
+              body: body,
+              query: query,
+              auth: auth,
+              retried: true,
+            );
+          }
+          await logout(byUser: false);
+          throw ApiException('Session expired. Please login again');
+        }
         throw ApiException(
           data['message'] as String? ?? 'Request failed (${resp.statusCode})',
         );
@@ -482,7 +926,7 @@ class TradingService extends ChangeNotifier {
   }
 
   Future<void> refreshAccount() async {
-    if (!isLoggedIn) return;
+    if (!await ensureSession()) return;
     try {
       final res = await _request('GET', '/v1/trade/account');
       final data = res['data'];
@@ -490,6 +934,13 @@ class TradingService extends ChangeNotifier {
         account = LiveAccount.fromJson(data);
         accountLoaded = true;
         notifyListeners();
+        final number = session?.accountNumber;
+        final i = fpAccounts.indexWhere((a) => a.accountNumber == number);
+        if (i >= 0 && fpAccounts[i].balance != account.balance) {
+          fpAccounts = [...fpAccounts]
+            ..[i] = fpAccounts[i].copyWith(balance: account.balance);
+          unawaited(_saveFpAccounts());
+        }
       }
       final pos = await _request(
         'GET',
@@ -498,13 +949,18 @@ class TradingService extends ChangeNotifier {
       );
       final list = pos['positions'];
       if (list is List) {
-        positions.clear();
+        // Live (WS) entry ko REST wale stale price se overwrite mat karo.
+        final fresh = <String, LivePosition>{};
         for (final item in list) {
           if (item is Map<String, dynamic>) {
             final p = LivePosition.fromWs(item);
-            if (p.positionId.isNotEmpty) positions[p.positionId] = p;
+            if (p.positionId.isEmpty) continue;
+            fresh[p.positionId] = positions[p.positionId] ?? p;
           }
         }
+        positions
+          ..clear()
+          ..addAll(fresh);
         notifyListeners();
       }
     } catch (e) {
@@ -554,7 +1010,7 @@ class TradingService extends ChangeNotifier {
       'deals' => '/v1/trade/deals',
       _ => '/v1/trade/positions',
     };
-    final query = <String, String>{'limit': '100', 'page': '1'};
+    final query = <String, String>{'limit': '1000', 'page': '1'};
     if (kind == 'positions') query['status'] = 'CLOSED';
     if (from != null) query['from'] = from.toIso8601String();
     if (to != null) query['to'] = to.toIso8601String();
@@ -564,14 +1020,14 @@ class TradingService extends ChangeNotifier {
   Future<Map<String, dynamic>> summary() =>
       _request('GET', '/v1/trade/summary');
 
-  Future<void> placeMarketOrder({
+  Future<Map<String, dynamic>> placeMarketOrder({
     required String symbol,
     required String side,
     required double volume,
     double? stopLoss,
     double? takeProfit,
   }) async {
-    await _request(
+    final res = await _request(
       'POST',
       '/v1/trade/market',
       body: {
@@ -583,9 +1039,11 @@ class TradingService extends ChangeNotifier {
       },
     );
     unawaited(refreshAccount());
+    final data = res['data'];
+    return data is Map<String, dynamic> ? data : <String, dynamic>{};
   }
 
-  Future<void> placePendingOrder({
+  Future<Map<String, dynamic>> placePendingOrder({
     required String symbol,
     required String side,
     required String orderType,
@@ -594,8 +1052,10 @@ class TradingService extends ChangeNotifier {
     required double volume,
     double? stopLoss,
     double? takeProfit,
+    String expireType = 'GTC',
+    DateTime? expireAt,
   }) async {
-    await _request(
+    final res = await _request(
       'POST',
       '/v1/trade/pending',
       body: {
@@ -607,12 +1067,16 @@ class TradingService extends ChangeNotifier {
         'volume': volume,
         if (stopLoss != null) 'stopLoss': stopLoss,
         if (takeProfit != null) 'takeProfit': takeProfit,
+        'expireType': expireType,
+        if (expireAt != null) 'expireAt': expireAt.toIso8601String(),
       },
     );
+    final data = res['data'];
+    return data is Map<String, dynamic> ? data : <String, dynamic>{};
   }
 
-  Future<void> closePosition(String positionId) async {
-    await _request(
+  Future<Map<String, dynamic>> closePosition(String positionId) async {
+    final res = await _request(
       'POST',
       '/v1/trade/position/close',
       body: {'positionId': positionId},
@@ -620,6 +1084,8 @@ class TradingService extends ChangeNotifier {
     positions.remove(positionId);
     notifyListeners();
     unawaited(refreshAccount());
+    final data = res['data'];
+    return data is Map<String, dynamic> ? data : <String, dynamic>{};
   }
 
   Future<void> modifyPosition({
@@ -632,6 +1098,24 @@ class TradingService extends ChangeNotifier {
       '/v1/trade/position/modify',
       body: {
         'positionId': positionId,
+        'stopLoss': stopLoss,
+        'takeProfit': takeProfit,
+      },
+    );
+  }
+
+  Future<void> modifyPending({
+    required String orderId,
+    required double price,
+    double? stopLoss,
+    double? takeProfit,
+  }) async {
+    await _request(
+      'PATCH',
+      '/v1/trade/pending/modify',
+      body: {
+        'orderId': orderId,
+        'price': price,
         'stopLoss': stopLoss,
         'takeProfit': takeProfit,
       },
@@ -866,7 +1350,7 @@ class TradingService extends ChangeNotifier {
         if (q.dayHigh > 0) q.dayHigh = q.dayHigh < bid ? bid : q.dayHigh;
         if (q.dayLow > 0) q.dayLow = q.dayLow > bid ? bid : q.dayLow;
         final list = _ticks.putIfAbsent(code, () => []);
-        list.add((q.time!, bid));
+        list.add((q.time!, bid, ask));
         if (list.length > 4000) list.removeRange(0, list.length - 4000);
         _notifyTick();
         return;
@@ -891,6 +1375,11 @@ class TradingService extends ChangeNotifier {
         case 'live_position':
           final p = LivePosition.fromWs(data);
           if (p.positionId.isNotEmpty) {
+            if (p.ticket != null) {
+              positions.removeWhere(
+                (id, old) => id != p.positionId && old.ticket == p.ticket,
+              );
+            }
             positions[p.positionId] = p;
             notifyListeners();
           }
@@ -901,6 +1390,11 @@ class TradingService extends ChangeNotifier {
         case 'live_pending':
           final o = PendingOrder.fromWs(data);
           if (o.orderId.isNotEmpty) {
+            if (o.ticket != null) {
+              pendings.removeWhere(
+                (id, old) => id != o.orderId && old.ticket == o.ticket,
+              );
+            }
             pendings[o.orderId] = o;
             notifyListeners();
           }
@@ -913,6 +1407,28 @@ class TradingService extends ChangeNotifier {
     } catch (_) {}
   }
 
+  /// Last [max] bid tick prices (New Order screen ke tick chart
+  /// ke liye, purane se naye order me).
+  List<double> tickHistoryFor(String symbol, {int max = 200}) {
+    final list = _ticks[symbol.toUpperCase()] ?? const [];
+    final start = list.length > max ? list.length - max : 0;
+    return [for (var i = start; i < list.length; i++) list[i].$2];
+  }
+
+  /// Last [max] bid+ask tick pairs - chart pe bid aur ask ki
+  /// alag-alag lines ke liye.
+  List<({double bid, double ask})> tickPairsFor(
+    String symbol, {
+    int max = 200,
+  }) {
+    final list = _ticks[symbol.toUpperCase()] ?? const [];
+    final start = list.length > max ? list.length - max : 0;
+    return [
+      for (var i = start; i < list.length; i++)
+        (bid: list[i].$2, ask: list[i].$3),
+    ];
+  }
+
   /// Build OHLC candles from collected ticks. [frameMinutes] e.g. 1,5,15,60.
   List<({DateTime t, double o, double h, double l, double c})> candlesFor(
     String symbol,
@@ -923,7 +1439,7 @@ class TradingService extends ChangeNotifier {
     if (ticks.isEmpty) return const [];
     final buckets = <int, List<double>>{};
     final order = <int>[];
-    for (final (time, price) in ticks) {
+    for (final (time, price, _) in ticks) {
       final key = time.millisecondsSinceEpoch ~/ (frameMinutes * 60000);
       if (!buckets.containsKey(key)) {
         buckets[key] = [];

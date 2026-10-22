@@ -16,6 +16,9 @@ class MtHeader extends StatelessWidget {
     this.titleLetterSpacing,
     this.titleHeightScale = 1,
     this.subtitleColor,
+    this.subtitleFontSize = 13,
+    this.subtitleLetterSpacing,
+    this.subtitleWeight = FontWeight.w400,
   });
 
   final String title;
@@ -29,6 +32,9 @@ class MtHeader extends StatelessWidget {
   final double? titleLetterSpacing;
   final double titleHeightScale;
   final Color? subtitleColor;
+  final double subtitleFontSize;
+  final double? subtitleLetterSpacing;
+  final FontWeight subtitleWeight;
 
   @override
   Widget build(BuildContext context) {
@@ -64,9 +70,10 @@ class MtHeader extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 color: subtitleColor ?? MtColors.textSecondary,
-                fontSize: 13,
+                fontSize: subtitleFontSize,
+                letterSpacing: subtitleLetterSpacing,
                 height: 1.2,
-                fontWeight: FontWeight.w400,
+                fontWeight: subtitleWeight,
               ),
             ),
         ],
@@ -81,7 +88,7 @@ class MtHeader extends StatelessWidget {
             MtIconButton(
               tooltip: 'Menu',
               onPressed: onMenu,
-              icon: Icon(Icons.menu, size: 26, color: MtColors.text),
+              icon: Icon(Icons.menu, size: 23, color: MtColors.text),
             ),
             if (center == null)
               Expanded(child: titleBlock)

@@ -1,13 +1,25 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/mt_colors.dart';
 import '../../core/shell_controller.dart';
+import '../../core/trade_sound.dart';
 import '../../core/trading_service.dart';
-import '../../core/widgets/mt_header.dart';
-import '../quotes/quote_data.dart';
 import '../shell/no_accounts_view.dart';
+import 'chart_controller.dart';
+import 'chart_icons.dart';
+import 'chart_models.dart';
+import 'chart_painter.dart';
+import 'one_click_bar.dart';
+import 'order_panel.dart';
+import 'radial_menu.dart';
+import 'timeframe_dialog.dart';
+
+const _chartsTabIndex = 1;
+const _blue = Color(0xFF168BE1);
 
 class ChartsScreen extends StatefulWidget {
   const ChartsScreen({super.key, required this.onMenu, required this.symbol});
@@ -20,277 +32,1074 @@ class ChartsScreen extends StatefulWidget {
 }
 
 class _ChartsScreenState extends State<ChartsScreen> {
-  static const _frames = [
-    'M1',
-    'M5',
-    'M15',
-    'M30',
-    'H1',
-    'H4',
-    'D1',
-    'W1',
-    'MN',
-  ];
-  String _frame = 'H1';
-  late List<_Candle> _candles;
+  static const _tfKey = 'chart_timeframe';
+  static const _favKey = 'chart_tf_favorites';
 
-  static const _minutes = {
-    'M1': 1,
-    'M5': 5,
-    'M15': 15,
-    'M30': 30,
-    'H1': 60,
-    'H4': 240,
-    'D1': 1440,
-    'W1': 10080,
-    'MN': 43200,
-  };
+  final _ctrl = ChartController();
+  ChartTimeframe _tf = ChartTimeframes.of('M5');
+  Set<String> _favorites = {...ChartTimeframes.defaultFavorites};
 
-  void _onLive() {
-    if (!mounted) return;
-    // Ye tab chhupa ho (IndexedStack) to chart rebuild mat karo -
-    // warna har tick par peeche chart banta rehta hai aur Quotes
-    // ka scroll atakata hai. Tab khulte hi shell rebuild se fresh
-    // chart ban jata hai.
-    final shell = ShellScope.maybeOf(context);
-    if (shell != null && shell.tab != 1) return;
-    setState(() {});
-  }
+  /// Viewport: candle chaudai (px) aur right se scroll (candles).
+  double _spacing = 9;
+  double _scroll = 0;
+  double _startSpacing = 9;
+  double _startScroll = 0;
+  Offset _startFocal = Offset.zero;
+  Size _chartSize = Size.zero;
+
+  /// Price scale (right) pe drag = vertical zoom (1 = auto fit).
+  double _vZoom = 1;
+  double _startVZoom = 1;
+  bool _axisDrag = false;
+
+  /// Neeche time scale pe drag = horizontal zoom (candle chaudai).
+  bool _timeAxisDrag = false;
+
+  bool _crossMode = false;
+  Offset? _cross;
+  bool _tfRow = false;
+  int _revision = 0;
+
+  ShellController? _shell;
+  bool _visible = false;
+
+  /// One-click trading patti + uska volume.
+  bool _oneClick = false;
+  double _oneClickVolume = 0.01;
+
+  /// Neeche wala order panel + chart pe kheenchne wali draft lines.
+  bool _panel = false;
+  final _draft = OrderDraft();
+  String? _dragId;
+  ChartScale? _dragScale;
+  bool _busy = false;
+
+  /// Long-press ka gol menu (chart-local center).
+  Offset? _radial;
 
   @override
   void initState() {
     super.initState();
-    _candles = _buildCandles(widget.symbol, _frame);
     tradingService.subscribe(widget.symbol);
     tradingService.addListener(_onLive);
+    _ctrl.addListener(_onCtrl);
+    _restorePrefs();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final shell = ShellScope.maybeOf(context);
+    if (shell != _shell) {
+      _shell?.removeListener(_onShell);
+      _shell = shell?..addListener(_onShell);
+      _onShell();
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant ChartsScreen old) {
+    super.didUpdateWidget(old);
+    if (old.symbol != widget.symbol) {
+      tradingService.subscribe(widget.symbol);
+      _resetView();
+      _ctrl.load(widget.symbol, _tf);
+    }
   }
 
   @override
   void dispose() {
+    _shell?.removeListener(_onShell);
     tradingService.removeListener(_onLive);
+    _ctrl
+      ..removeListener(_onCtrl)
+      ..dispose();
     super.dispose();
   }
 
-  @override
-  void didUpdateWidget(covariant ChartsScreen oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.symbol != widget.symbol) {
-      _candles = _buildCandles(widget.symbol, _frame);
-      tradingService.subscribe(widget.symbol);
+  Future<void> _restorePrefs() async {
+    final p = await SharedPreferences.getInstance();
+    final tf = p.getString(_tfKey);
+    final fav = p.getStringList(_favKey);
+    if (!mounted) return;
+    setState(() {
+      if (tf != null) _tf = ChartTimeframes.of(tf);
+      if (fav != null) _favorites = _normalizeFavorites(fav);
+    });
+    // Purane (seema se pehle ke) zyada favourites theek karke save.
+    if (fav != null && fav.length != _favorites.length) {
+      await p.setStringList(_favKey, _favorites.toList());
+    }
+    _ctrl.load(widget.symbol, _tf);
+  }
+
+  /// Chart sirf Charts tab khula ho tab live update + countdown chalaye.
+  void _onShell() {
+    final visible = (_shell?.tab ?? _chartsTabIndex) == _chartsTabIndex;
+    if (visible == _visible) return;
+    _visible = visible;
+    _ctrl.setVisible(visible);
+    if (visible && mounted) setState(() {});
+  }
+
+  void _onCtrl() {
+    if (mounted && _visible) setState(() {});
+  }
+
+  void _onLive() {
+    if (!mounted || !_visible) return;
+    final q = tradingService.quotes[widget.symbol.toUpperCase()];
+    if (q == null || !q.hasPrice) return;
+    if (_ctrl.onTick(q.bid, q.time ?? DateTime.now())) _revision++;
+    // Bid / Ask pichhle tick se upar (blue) ya neeche (red); same ho to
+    // pichhla rang rehne do.
+    if (_lastBid != null && q.bid != _lastBid) _bidUp = q.bid > _lastBid!;
+    if (_lastAsk != null && q.ask != _lastAsk) _askUp = q.ask > _lastAsk!;
+    _lastBid = q.bid;
+    _lastAsk = q.ask;
+    setState(() {});
+  }
+
+  double? _lastBid;
+  double? _lastAsk;
+  bool _bidUp = true;
+  bool _askUp = true;
+
+  void _resetView() {
+    _scroll = 0;
+    _cross = null;
+  }
+
+  Future<void> _selectTimeframe(String code) async {
+    final tf = ChartTimeframes.of(code);
+    setState(() {
+      _tf = tf;
+      _tfRow = false;
+      _resetView();
+    });
+    _ctrl.load(widget.symbol, tf);
+    final p = await SharedPreferences.getInstance();
+    await p.setString(_tfKey, code);
+  }
+
+  /// Saved favourites 3..9 me: zyada hon to timeframe order me pehle 9,
+  /// kam hon to MT5 default.
+  static Set<String> _normalizeFavorites(List<String> saved) {
+    final valid = [
+      for (final tf in ChartTimeframes.all)
+        if (saved.contains(tf.code)) tf.code,
+    ];
+    if (valid.length < minFavoriteTimeframes) {
+      return {...ChartTimeframes.defaultFavorites};
+    }
+    return valid.take(maxFavoriteTimeframes).toSet();
+  }
+
+  Future<void> _toggleFavorite(String code) async {
+    final isFav = _favorites.contains(code);
+    // Dialog pehle hi rok deta hai; yahan bhi 3..9 ki seema pakki.
+    if (isFav && _favorites.length - 1 < minFavoriteTimeframes) return;
+    if (!isFav && _favorites.length + 1 > maxFavoriteTimeframes) return;
+    setState(() => isFav ? _favorites.remove(code) : _favorites.add(code));
+    final p = await SharedPreferences.getInstance();
+    await p.setStringList(_favKey, _favorites.toList());
+  }
+
+  Future<void> _openTimeframes() async {
+    final picked = await showTimeframeDialog(
+      context,
+      selected: _tf.code,
+      favorites: _favorites,
+      onToggleFavorite: _toggleFavorite,
+    );
+    if (picked != null) await _selectTimeframe(picked);
+  }
+
+  /* ---------------- gestures ---------------- */
+
+  ChartLayout get _layout => ChartLayout(
+    size: _chartSize,
+    count: _ctrl.candles.length,
+    spacing: _spacing,
+    scroll: _scroll,
+  );
+
+  double _clampScroll(double s) {
+    final n = _ctrl.candles.length;
+    final visible = _layout.plotWidth / _spacing;
+    final minS = -math.max(0.0, visible / 2 - ChartLayout.rightMargin);
+    final maxS = math.max(0.0, n - 5.0);
+    return s.clamp(minS, maxS);
+  }
+
+  void _onScaleStart(ScaleStartDetails d) {
+    _startSpacing = _spacing;
+    _startScroll = _scroll;
+    _startFocal = d.localFocalPoint;
+    _startVZoom = _vZoom;
+    _dragId = null;
+    _axisDrag = d.pointerCount == 1 && d.localFocalPoint.dx > _layout.plotWidth;
+    _timeAxisDrag =
+        !_axisDrag &&
+        d.pointerCount == 1 &&
+        d.localFocalPoint.dy > _layout.plotBottom;
+    if (_axisDrag || _timeAxisDrag) return;
+    // Order panel khula ho to draft line (price / SL / TP) pakdo.
+    if (_panel && d.pointerCount == 1) {
+      final scale = _scale;
+      if (scale == null) return;
+      String? best;
+      var bestDist = 22.0;
+      for (final lv in _draftLevels()) {
+        final dist = (scale.yOf(lv.price) - d.localFocalPoint.dy).abs();
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = lv.id;
+        }
+      }
+      if (best != null) {
+        _dragId = best;
+        _dragScale = scale;
+      }
     }
   }
 
-  void _selectFrame(String frame) {
+  void _onScaleUpdate(ScaleUpdateDetails d) {
+    if (_axisDrag) {
+      // Neeche kheencho = range badi (candles chhote), upar = candles bade.
+      final dy = d.localFocalPoint.dy - _startFocal.dy;
+      setState(() {
+        _vZoom = (_startVZoom * math.exp(dy / 180)).clamp(0.15, 8.0);
+      });
+      return;
+    }
+    if (_timeAxisDrag) {
+      // Right kheencho = candles chaude, left = patle (zyada candles).
+      final dx = d.localFocalPoint.dx - _startFocal.dx;
+      setState(() {
+        _spacing = (_startSpacing * math.exp(dx / 160)).clamp(2.0, 40.0);
+        _scroll = _clampScroll(_scroll);
+      });
+      final (first, _) = _layout.visibleRange;
+      if (first < 30) _ctrl.loadOlder();
+      return;
+    }
+    final dragScale = _dragScale;
+    if (_dragId != null && dragScale != null) {
+      final price = _roundPrice(dragScale.priceAt(d.localFocalPoint.dy));
+      setState(() {
+        switch (_dragId) {
+          case 'draft':
+            _draft.price = price;
+          case 'draft_sl':
+            _draft.sl = price;
+          case 'draft_tp':
+            _draft.tp = price;
+        }
+      });
+      return;
+    }
+    if (_crossMode && d.pointerCount == 1) {
+      setState(() => _cross = d.localFocalPoint);
+      return;
+    }
     setState(() {
-      _frame = frame;
-      _candles = _buildCandles(widget.symbol, frame);
+      _spacing = (_startSpacing * d.horizontalScale).clamp(2.0, 40.0);
+      final dx = d.localFocalPoint.dx - _startFocal.dx;
+      _scroll = _clampScroll(_startScroll + dx / _spacing);
+    });
+    final (first, _) = _layout.visibleRange;
+    if (first < 30) _ctrl.loadOlder();
+  }
+
+  void _onScaleEnd(ScaleEndDetails _) {
+    _dragId = null;
+    _dragScale = null;
+    _axisDrag = false;
+    _timeAxisDrag = false;
+  }
+
+  /* ---------------- levels (chart lines) ---------------- */
+
+  int get _digits {
+    final q = tradingService.quotes[widget.symbol.toUpperCase()];
+    return _ctrl.digits ?? q?.digits ?? 5;
+  }
+
+  double _roundPrice(double p) {
+    final f = math.pow(10, _digits).toDouble();
+    return (p * f).round() / f;
+  }
+
+  ChartScale? get _scale {
+    final q = tradingService.quotes[widget.symbol.toUpperCase()];
+    return ChartScale.compute(
+      candles: _ctrl.candles,
+      layout: _layout,
+      digits: _digits,
+      bid: q != null && q.hasPrice ? q.bid : null,
+      extra: [for (final l in _levels()) l.price],
+      zoom: _vZoom,
+    );
+  }
+
+  static String _lots(double v) => v.toStringAsFixed(2);
+
+  /// Is symbol ki khuli positions, pending orders aur unke SL / TP.
+  List<ChartLevel> _tradeLevels() {
+    final sym = widget.symbol.toUpperCase();
+    final out = <ChartLevel>[];
+    for (final p in tradingService.positions.values) {
+      if (p.symbol.toUpperCase() != sym) continue;
+      out.add(
+        ChartLevel(
+          id: 'pos_${p.positionId}',
+          price: p.openPrice,
+          label: '${p.isBuy ? 'BUY' : 'SELL'} ${_lots(p.volume)}',
+          color: p.isBuy ? _blue : chartDownColor,
+        ),
+      );
+      if ((p.stopLoss ?? 0) > 0) {
+        out.add(
+          ChartLevel(
+            id: 'pos_sl_${p.positionId}',
+            price: p.stopLoss!,
+            label: 'SL',
+            color: chartDownColor,
+            dashed: true,
+          ),
+        );
+      }
+      if ((p.takeProfit ?? 0) > 0) {
+        out.add(
+          ChartLevel(
+            id: 'pos_tp_${p.positionId}',
+            price: p.takeProfit!,
+            label: 'TP',
+            color: const Color(0xFF2E9E3F),
+            dashed: true,
+          ),
+        );
+      }
+    }
+    for (final o in tradingService.pendings.values) {
+      if (o.symbol.toUpperCase() != sym) continue;
+      out.add(
+        ChartLevel(
+          id: 'ord_${o.orderId}',
+          price: o.price,
+          label: '${o.orderType.replaceAll('_', ' ')} ${_lots(o.volume)}',
+          color: o.isBuy ? _blue : chartDownColor,
+        ),
+      );
+    }
+    return out;
+  }
+
+  /// Order panel ki kheenchne wali lines.
+  List<ChartLevel> _draftLevels() {
+    if (!_panel) return const [];
+    final out = <ChartLevel>[];
+    final color = _draft.pending && !_draft.isBuy ? chartDownColor : _blue;
+    if (_draft.pending && _draft.price != null) {
+      out.add(
+        ChartLevel(
+          id: 'draft',
+          price: _draft.price!,
+          label: '${_draft.type.replaceAll('_', ' ')} ${_lots(_draft.volume)}',
+          color: color,
+          draggable: true,
+        ),
+      );
+    }
+    if (_draft.sl != null) {
+      out.add(
+        ChartLevel(
+          id: 'draft_sl',
+          price: _draft.sl!,
+          label: 'SL',
+          color: chartDownColor,
+          dashed: true,
+          draggable: true,
+        ),
+      );
+    }
+    if (_draft.tp != null) {
+      out.add(
+        ChartLevel(
+          id: 'draft_tp',
+          price: _draft.tp!,
+          label: 'TP',
+          color: const Color(0xFF2E9E3F),
+          dashed: true,
+          draggable: true,
+        ),
+      );
+    }
+    return out;
+  }
+
+  /// Khuli positions / pending orders ki lines abhi chart par nahi.
+  static const _showTradeLines = false;
+
+  List<ChartLevel> _levels() => [
+    if (_showTradeLines) ..._tradeLevels(),
+    ..._draftLevels(),
+  ];
+
+  /* ---------------- order panel / one click ---------------- */
+
+  /// Draft line ke liye default doori: dikh rahe range ka ~15%.
+  double get _offset {
+    final candles = _ctrl.candles;
+    if (candles.isEmpty) return math.pow(10, -_digits).toDouble() * 200;
+    final scale = ChartScale.compute(
+      candles: candles,
+      layout: _layout,
+      digits: _digits,
+    );
+    return (scale?.range ?? 0) * 0.15;
+  }
+
+  ({double bid, double ask})? get _prices {
+    final q = tradingService.quotes[widget.symbol.toUpperCase()];
+    if (q != null && q.hasPrice) return (bid: q.bid, ask: q.ask);
+    final c = _ctrl.candles.isEmpty ? null : _ctrl.candles.last.c;
+    return c == null ? null : (bid: c, ask: c);
+  }
+
+  void _selectOrderType(String type) {
+    final px = _prices;
+    final off = _offset;
+    setState(() {
+      _draft.type = type;
+      _draft.sl = null;
+      _draft.tp = null;
+      if (px == null || type == 'MARKET') {
+        _draft.price = null;
+        return;
+      }
+      _draft.price = _roundPrice(switch (type) {
+        'BUY_LIMIT' => px.ask - off,
+        'SELL_LIMIT' => px.bid + off,
+        'BUY_STOP' => px.ask + off,
+        _ => px.bid - off,
+      });
     });
   }
 
+  /// SL / TP on-off. Market pe BUY ke hisaab se (SL neeche, TP upar).
+  void _toggleLevel({required bool sl}) {
+    final px = _prices;
+    if (px == null) return;
+    final entry = _draft.price ?? (_draft.isBuy ? px.ask : px.bid);
+    final buy = !_draft.pending || _draft.isBuy;
+    final off = _offset;
+    setState(() {
+      if (sl) {
+        _draft.sl = _draft.sl != null
+            ? null
+            : _roundPrice(buy ? entry - off : entry + off);
+      } else {
+        _draft.tp = _draft.tp != null
+            ? null
+            : _roundPrice(buy ? entry + off : entry - off);
+      }
+    });
+  }
+
+  void _result(bool ok, String message) {
+    unawaited(ok ? TradeSound.ok() : TradeSound.error());
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  String _ticketOf(Map<String, dynamic> data) {
+    final t = data['ticket'];
+    return t is num ? ' #${t.toInt()}' : '';
+  }
+
+  Future<void> _marketOrder(
+    String side,
+    double volume, {
+    double? sl,
+    double? tp,
+  }) async {
+    if (_busy) return;
+    if (!await tradingService.ensureSession()) {
+      _result(false, 'Not logged in. Please login to your account.');
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      final data = await tradingService.placeMarketOrder(
+        symbol: widget.symbol,
+        side: side,
+        volume: volume,
+        stopLoss: sl,
+        takeProfit: tp,
+      );
+      final price = double.tryParse('${data['openPrice'] ?? ''}');
+      _result(
+        true,
+        '$side ${_lots(volume)} ${widget.symbol}'
+        '${price != null ? ' at ${price.toStringAsFixed(_digits)}' : ''}'
+        '${_ticketOf(data)} done',
+      );
+      if (sl != null || tp != null) {
+        setState(() {
+          _draft.sl = null;
+          _draft.tp = null;
+        });
+      }
+    } catch (e) {
+      _result(false, '$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _placePending() async {
+    final price = _draft.price;
+    if (_busy || price == null) return;
+    if (!await tradingService.ensureSession()) {
+      _result(false, 'Not logged in. Please login to your account.');
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      final data = await tradingService.placePendingOrder(
+        symbol: widget.symbol,
+        side: _draft.side,
+        orderType: _draft.type,
+        price: price,
+        volume: _draft.volume,
+        stopLoss: _draft.sl,
+        takeProfit: _draft.tp,
+      );
+      _result(
+        true,
+        '${_draft.type.replaceAll('_', ' ')} ${_lots(_draft.volume)} '
+        '${widget.symbol} at ${price.toStringAsFixed(_digits)}'
+        '${_ticketOf(data)} placed',
+      );
+      setState(() {
+        _draft.sl = null;
+        _draft.tp = null;
+      });
+    } catch (e) {
+      _result(false, '$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  void _togglePanel() {
+    setState(() {
+      _panel = !_panel;
+      if (_panel) {
+        _crossMode = false;
+        _cross = null;
+      }
+    });
+    if (_panel && _draft.pending && _draft.price == null) {
+      _selectOrderType(_draft.type);
+    }
+  }
+
+  /* ---------------- radial menu ---------------- */
+
+  /// Chart pe tap: crosshair mode me crosshair wahan, warna gol menu.
+  void _onChartTap(TapUpDetails d) {
+    if (_crossMode) {
+      setState(() => _cross = d.localPosition);
+      return;
+    }
+    if (_dragId != null) return;
+    const r = RadialMenu.outer;
+    final w = _chartSize.width;
+    final h = _chartSize.height;
+    setState(() {
+      _radial = Offset(
+        w < 2 * r ? w / 2 : d.localPosition.dx.clamp(r, w - r),
+        h < 2 * r ? h / 2 : d.localPosition.dy.clamp(r, h - r),
+      );
+    });
+  }
+
+  List<RadialItem> _radialItems() => [
+    for (final tf in ChartTimeframes.all)
+      if (_favorites.contains(tf.code))
+        RadialItem(
+          label: tf.code,
+          selected: tf.code == _tf.code,
+          onTap: () => _selectTimeframe(tf.code),
+        ),
+    // MT5 order (clockwise, MN ke baad): indicators, crosshair, settings,
+    // objects, windows - app ke apne icons, ring pe safed.
+    RadialItem(
+      asset: ChartToolIcon.indicators,
+      onTap: () => _soon('Indicators'),
+    ),
+    RadialItem(
+      asset: _crossMode ? ChartToolIcon.move : ChartToolIcon.crosshair,
+      onTap: _toggleCross,
+    ),
+    RadialItem(asset: ChartToolIcon.sliders, onTap: _openTimeframes),
+    RadialItem(asset: ChartToolIcon.objects, onTap: () => _soon('Objects')),
+    RadialItem(asset: ChartToolIcon.windows, onTap: _openSymbolList),
+  ];
+
+  void _toggleCross() {
+    setState(() {
+      _crossMode = !_crossMode;
+      _cross = _crossMode
+          ? Offset(_layout.plotWidth / 2, _chartSize.height / 2)
+          : null;
+    });
+  }
+
+  /* ---------------- symbol picker ---------------- */
+
+  void _soon(String what) => ScaffoldMessenger.of(
+    context,
+  ).showSnackBar(SnackBar(content: Text('$what coming soon')));
+
+  /// Gol menu ka "windows" icon: chart ke upar-left se symbol list.
+  void _openSymbolList() {
+    final box = context.findRenderObject() as RenderBox?;
+    final origin = box?.localToGlobal(Offset.zero) ?? Offset.zero;
+    _showSymbolList(origin + const Offset(0, 60));
+  }
+
+  Future<void> _pickSymbol(BuildContext anchor) async {
+    final box = anchor.findRenderObject() as RenderBox;
+    await _showSymbolList(box.localToGlobal(Offset.zero));
+  }
+
+  Future<void> _showSymbolList(Offset pos) async {
+    final symbols = [
+      for (final w in tradingService.watchlist) w.code,
+      if (!tradingService.watchlist.any((w) => w.code == widget.symbol))
+        widget.symbol,
+    ];
+    final screen = MediaQuery.of(context).size;
+    final padTop = MediaQuery.of(context).padding.top;
+    // Neeche (order panel) se khola to list anchor ke UPAR khule.
+    final upward = pos.dy > screen.height / 2;
+    final maxH = upward ? pos.dy - padTop - 8 : screen.height - pos.dy - 16;
+    final picked = await showGeneralDialog<String>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'chart-symbols',
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 120),
+      pageBuilder: (ctx, _, _) => Stack(
+        children: [
+          Positioned(
+            left: 16,
+            top: upward ? null : pos.dy,
+            bottom: upward ? screen.height - pos.dy + 4 : null,
+            child: Material(
+              color: MtColors.isDark ? MtColors.white : const Color(0xFFF7F7F7),
+              elevation: 8,
+              borderRadius: BorderRadius.circular(18),
+              clipBehavior: Clip.antiAlias,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(maxHeight: math.min(560, maxH)),
+                child: IntrinsicWidth(
+                  child: SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        for (final s in symbols)
+                          InkWell(
+                            onTap: () => Navigator.of(ctx).pop(s),
+                            child: Padding(
+                              padding: const EdgeInsets.fromLTRB(
+                                18,
+                                14,
+                                28,
+                                14,
+                              ),
+                              child: Text(
+                                s,
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w500,
+                                  color: MtColors.text,
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+      transitionBuilder: (_, anim, _, child) =>
+          FadeTransition(opacity: anim, child: child),
+    );
+    if (picked == null || picked == widget.symbol || !mounted) return;
+    _shell?.openChart(picked);
+  }
+
+  /* ---------------- build ---------------- */
+
   @override
   Widget build(BuildContext context) {
-    final quote = quoteBySymbol(widget.symbol);
-    final liveQuote = tradingService.quotes[widget.symbol];
-    final liveCandles = tradingService.candlesFor(
-      widget.symbol,
-      _minutes[_frame] ?? 60,
-    );
-    final candles = liveCandles.isNotEmpty
-        ? [for (final c in liveCandles) _Candle(c.o, c.h, c.l, c.c)]
-        : _candles;
-    final digits = liveQuote?.digits ?? quote?.digits ?? 5;
     return ColoredBox(
       color: MtColors.white,
       child: Column(
         children: [
-          MtHeader(
-            title: widget.symbol,
-            subtitle: _frame,
-            onMenu: widget.onMenu,
-          ),
-          SizedBox(
-            height: 36,
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                border: Border(bottom: BorderSide(color: MtColors.line)),
-              ),
-              child: ListView.builder(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                itemCount: _frames.length,
-                itemBuilder: (context, index) {
-                  final frame = _frames[index];
-                  final selected = frame == _frame;
-                  return InkWell(
-                    onTap: () => _selectFrame(frame),
-                    child: Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 10),
-                      child: Center(
-                        child: Text(
-                          frame,
-                          style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: selected
-                                ? FontWeight.w700
-                                : FontWeight.w400,
-                            color: selected ? MtColors.accent : MtColors.icon,
-                          ),
-                        ),
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
-          ),
-          if (liveQuote != null && liveQuote.hasPrice)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 6, 16, 2),
-              child: Row(
-                children: [
-                  Text(
-                    'Bid  ${liveQuote.bid.toStringAsFixed(digits)}',
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
-                      color: MtColors.bid,
-                    ),
-                  ),
-                  const SizedBox(width: 20),
-                  Text(
-                    'Ask  ${liveQuote.ask.toStringAsFixed(digits)}',
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
-                      color: MtColors.ask,
-                    ),
-                  ),
-                ],
+          _toolbar(),
+          // One-click patti khulte / band hote smooth slide (pop nahi).
+          // Patti hamesha bani rehti hai; band pe upar slide hoke chhupti hai
+          // (khulne aur band hone dono pe animation).
+          if (tradingService.hasAnyAccount)
+            ClipRect(
+              child: AnimatedAlign(
+                duration: const Duration(milliseconds: 220),
+                curve: Curves.easeOutCubic,
+                alignment: Alignment.bottomCenter,
+                heightFactor: _oneClick ? 1 : 0,
+                child: IgnorePointer(
+                  ignoring: !_oneClick,
+                  child: _oneClickBar(),
+                ),
               ),
             ),
           Expanded(
             child: !tradingService.hasAnyAccount
                 ? const NoAccountsBody()
-                : RepaintBoundary(
-                    child: CustomPaint(
-                      painter: _ChartPainter(candles: candles, digits: digits),
-                      child: const SizedBox.expand(),
-                    ),
-                  ),
+                : _chartArea(),
           ),
+          if (_panel && tradingService.hasAnyAccount) _orderPanel(),
         ],
       ),
     );
   }
-}
 
-class _Candle {
-  const _Candle(this.open, this.high, this.low, this.close);
-
-  final double open;
-  final double high;
-  final double low;
-  final double close;
-}
-
-List<_Candle> _buildCandles(String symbol, String frame) {
-  final quote = quoteBySymbol(symbol);
-  var price = quote?.base ?? 1.0;
-  final digits = quote?.digits ?? 5;
-  final step = math.pow(10, -digits).toDouble() * 6;
-  var seed = frame.codeUnits.fold<int>(0, (sum, unit) => sum + unit);
-  seed = symbol.codeUnits.fold<int>(seed + 17, (sum, unit) => sum * 3 + unit);
-  final candles = <_Candle>[];
-  for (var i = 0; i < 56; i++) {
-    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-    final delta = ((seed % 21) - 10) * step;
-    final open = price;
-    final close = price + delta;
-    final high = math.max(open, close) + step * 0.85;
-    final low = math.min(open, close) - step * 0.7;
-    candles.add(_Candle(open, high, low, close));
-    price = close;
-  }
-  return candles;
-}
-
-class _ChartPainter extends CustomPainter {
-  const _ChartPainter({required this.candles, required this.digits});
-
-  final List<_Candle> candles;
-  final int digits;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (candles.isEmpty || size.width <= 0 || size.height <= 0) return;
-    var minPrice = candles.first.low;
-    var maxPrice = candles.first.high;
-    for (final candle in candles) {
-      minPrice = math.min(minPrice, candle.low);
-      maxPrice = math.max(maxPrice, candle.high);
-    }
-    final span = math.max(
-      maxPrice - minPrice,
-      math.pow(10, -digits).toDouble(),
+  Widget _oneClickBar() {
+    final px = _prices;
+    return OneClickBar(
+      digits: _digits,
+      bid: px?.bid,
+      ask: px?.ask,
+      bidUp: _bidUp,
+      askUp: _askUp,
+      volume: _oneClickVolume,
+      busy: _busy,
+      onVolume: (v) => setState(() => _oneClickVolume = v),
+      onTrade: (side) => _marketOrder(side, _oneClickVolume),
     );
-    const topPad = 16.0;
-    const bottomPad = 12.0;
-    const rightPad = 8.0;
-    final plotHeight = size.height - topPad - bottomPad;
-    final plotWidth = size.width - rightPad;
-
-    final grid = Paint()
-      ..color = const Color(0xFFEEEEEE)
-      ..strokeWidth = 1;
-    for (var i = 0; i <= 4; i++) {
-      final y = topPad + plotHeight * i / 4;
-      canvas.drawLine(Offset(0, y), Offset(size.width, y), grid);
-    }
-    for (var i = 1; i <= 4; i++) {
-      final x = plotWidth * i / 4;
-      canvas.drawLine(
-        Offset(x, topPad),
-        Offset(x, size.height - bottomPad),
-        grid,
-      );
-    }
-
-    double yOf(double price) {
-      final t = (price - minPrice) / span;
-      return topPad + plotHeight * (1 - t);
-    }
-
-    final slot = plotWidth / candles.length;
-    final bodyWidth = math.max(2.0, slot * 0.55);
-    for (var i = 0; i < candles.length; i++) {
-      final candle = candles[i];
-      final up = candle.close >= candle.open;
-      final color = up ? MtColors.priceUp : MtColors.priceDown;
-      final x = slot * i + slot / 2;
-      final wick = Paint()
-        ..color = color
-        ..strokeWidth = 1.2;
-      canvas.drawLine(
-        Offset(x, yOf(candle.high)),
-        Offset(x, yOf(candle.low)),
-        wick,
-      );
-      final top = yOf(math.max(candle.open, candle.close));
-      final bottom = yOf(math.min(candle.open, candle.close));
-      final bodyHeight = math.max(1.0, bottom - top);
-      canvas.drawRect(
-        Rect.fromCenter(
-          center: Offset(x, top + bodyHeight / 2),
-          width: bodyWidth,
-          height: bodyHeight,
-        ),
-        Paint()..color = color,
-      );
-    }
   }
 
-  @override
-  bool shouldRepaint(covariant _ChartPainter oldDelegate) {
-    return oldDelegate.candles != candles || oldDelegate.digits != digits;
+  Widget _orderPanel() {
+    return OrderPanel(
+      symbol: widget.symbol,
+      draft: _draft,
+      digits: _digits,
+      busy: _busy,
+      onType: _selectOrderType,
+      onVolume: (v) => setState(() => _draft.volume = v),
+      onToggleSl: () => _toggleLevel(sl: true),
+      onToggleTp: () => _toggleLevel(sl: false),
+      onPlacePending: _placePending,
+      onMarket: (side) =>
+          _marketOrder(side, _draft.volume, sl: _draft.sl, tp: _draft.tp),
+      onSymbol: _pickSymbol,
+      onClose: () => setState(() => _panel = false),
+    );
+  }
+
+  Widget _toolbar() {
+    return SizedBox(
+      height: 56,
+      child: _tfRow
+          ? Row(
+              children: [
+                // Favourites (3..9) poori row me barabar baante - kam hon
+                // to ek kinare nahi chipakte.
+                const SizedBox(width: 4),
+                for (final tf in ChartTimeframes.all)
+                  if (_favorites.contains(tf.code))
+                    Expanded(
+                      child: InkWell(
+                        onTap: () => _selectTimeframe(tf.code),
+                        child: Center(
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text(
+                              tf.code,
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w500,
+                                color: tf.code == _tf.code
+                                    ? _blue
+                                    : MtColors.icon,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                IconButton(
+                  onPressed: _openTimeframes,
+                  icon: const ChartToolIcon(ChartToolIcon.gear, tint: true),
+                ),
+              ],
+            )
+          : Row(
+              children: [
+                IconButton(
+                  onPressed: widget.onMenu,
+                  icon: Icon(Icons.menu, size: 23, color: MtColors.text),
+                ),
+                const Spacer(),
+                IconButton(
+                  tooltip: 'Crosshair',
+                  onPressed: _toggleCross,
+                  icon: ChartToolIcon(
+                    _crossMode ? ChartToolIcon.move : ChartToolIcon.crosshair,
+                    tint: true,
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Indicators',
+                  onPressed: () => ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Indicators coming soon')),
+                  ),
+                  icon: const ChartToolIcon(
+                    ChartToolIcon.indicators,
+                    tint: true,
+                  ),
+                ),
+                InkWell(
+                  onTap: () => setState(() => _tfRow = true),
+                  onLongPress: _openTimeframes,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: Center(
+                      child: Text(
+                        _tf.code,
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w500,
+                          color: MtColors.isDark
+                              ? MtColors.icon
+                              : const Color(0xFF333333),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Trade',
+                  onPressed: _togglePanel,
+                  icon: ChartToolIcon(ChartToolIcon.trade, active: _panel),
+                ),
+                IconButton(
+                  tooltip: 'One-click trading',
+                  onPressed: () => setState(() => _oneClick = !_oneClick),
+                  icon: ChartToolIcon(
+                    ChartToolIcon.oneClick,
+                    active: _oneClick,
+                  ),
+                ),
+                const SizedBox(width: 2),
+              ],
+            ),
+    );
+  }
+
+  Widget _chartArea() {
+    final q = tradingService.quotes[widget.symbol.toUpperCase()];
+    final digits = _ctrl.digits ?? q?.digits ?? 5;
+    final candles = _ctrl.candles;
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: LayoutBuilder(
+            builder: (context, box) {
+              _chartSize = box.biggest;
+              return GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onScaleStart: _onScaleStart,
+                onScaleUpdate: _onScaleUpdate,
+                onScaleEnd: _onScaleEnd,
+                // Double tap nahi - warna har tap pe ~300ms ruk ke menu khulta.
+                onTapUp: _onChartTap,
+                child: RepaintBoundary(
+                  child: CustomPaint(
+                    size: box.biggest,
+                    painter: ChartPainter(
+                      levels: _levels(),
+                      vZoom: _vZoom,
+                      candles: candles,
+                      timeframe: _tf,
+                      digits: digits,
+                      spacing: _spacing,
+                      scroll: _scroll,
+                      bid: q != null && q.hasPrice ? q.bid : null,
+                      ask: q != null && q.hasPrice ? q.ask : null,
+                      secondsLeft: _ctrl.secondsLeft,
+                      crosshair: _crossMode ? _cross : null,
+                      revision: _revision,
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        Positioned(left: 6, top: 4, child: _info(candles, digits)),
+        // MT5 jaisa: upar beech me "Processing chart data..." jab tak load.
+        if (_ctrl.loading)
+          Positioned(
+            top: 6,
+            left: 0,
+            right: ChartLayout.axisWidth,
+            child: Center(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: MtColors.icon,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Processing chart data...',
+                    style: TextStyle(fontSize: 13, color: MtColors.text),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        if (_ctrl.loadingMore)
+          const Positioned(
+            left: 8,
+            top: 70,
+            child: SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          ),
+        if (_ctrl.error != null && candles.isEmpty)
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _ctrl.error!,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: MtColors.icon, fontSize: 14),
+                  ),
+                  TextButton(
+                    onPressed: _ctrl.reload,
+                    child: const Text('Retry'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        if (_radial != null)
+          Positioned.fill(
+            child: RadialMenu(
+              center: _radial!,
+              items: _radialItems(),
+              onClose: () => setState(() => _radial = null),
+            ),
+          ),
+      ],
+    );
+  }
+
+  /// Upar left: "USDJPY ▾ M5", naam, aur OHLC (crosshair wala ya last).
+  Widget _info(List<Candle> candles, int digits) {
+    Candle? k;
+    if (candles.isNotEmpty) {
+      if (_crossMode && _cross != null) {
+        k = candles[_layout.indexAt(_cross!.dx).clamp(0, candles.length - 1)];
+      } else {
+        k = candles.last;
+      }
+    }
+    String f(double v) => v.toStringAsFixed(digits);
+    final name = _ctrl.name.isNotEmpty
+        ? _ctrl.name
+        : tradingService.watchlist
+                  .where((w) => w.code == widget.symbol)
+                  .firstOrNull
+                  ?.name ??
+              '';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Builder(
+          builder: (anchor) => GestureDetector(
+            onTap: () => _pickSymbol(anchor),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  widget.symbol,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    height: 1.1,
+                    letterSpacing: -0.4,
+                    fontWeight: FontWeight.w600,
+                    color: _blue,
+                  ),
+                ),
+                const Icon(Icons.arrow_drop_down, size: 14, color: _blue),
+                Text(
+                  _tf.code,
+                  style: TextStyle(
+                    fontSize: 12,
+                    height: 1.1,
+                    letterSpacing: -0.4,
+                    color: MtColors.text,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (name.isNotEmpty)
+          Text(
+            name,
+            style: TextStyle(
+              fontSize: 12,
+              height: 1.1,
+              letterSpacing: -0.4,
+              color: MtColors.text,
+            ),
+          ),
+        if (k != null)
+          Text(
+            '${f(k.o)} ${f(k.h)} ${f(k.l)} ${f(k.c)}',
+            style: TextStyle(
+              fontSize: 12,
+              height: 1.1,
+              letterSpacing: -0.4,
+              color: MtColors.text,
+            ),
+          ),
+      ],
+    );
   }
 }

@@ -52,16 +52,6 @@ class _MqAccountLoginPageState extends State<MqAccountLoginPage> {
       _snack('Enter login and password');
       return;
     }
-    // Locally saved password match ho to seedha isi account ko
-    // active kar do (server ki zaroorat nahi).
-    final savedPass = '${widget.account['password'] ?? ''}';
-    if (savedPass.isNotEmpty &&
-        pass == savedPass &&
-        login == '${widget.account['login_id']}') {
-      await tradingService.setMqAccount({...widget.account, 'password': pass});
-      if (mounted) Navigator.of(context).pop();
-      return;
-    }
     setState(() => _busy = true);
     try {
       final profile = await tradingService.loginMetaQuotesDemo(

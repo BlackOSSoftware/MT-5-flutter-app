@@ -8,6 +8,7 @@ import '../../core/trading_service.dart';
 import '../../core/widgets/mt_bottom_nav.dart';
 import '../account/account_data.dart';
 import '../account/accounts_page.dart';
+import '../account/fp_trades_page.dart';
 import 'settings_page.dart';
 import 'simple_page.dart';
 
@@ -486,15 +487,11 @@ class _Header extends StatelessWidget {
         // Jo account sabse LAST me login hua hai wahi upar
         // dikhega (FP Trades session ya MetaQuotes demo).
         final mq = tradingService.mqAccount;
-        if (tradingService.activeSource == 'server' &&
-            tradingService.isLoggedIn) {
-          return _loggedIn(context);
+        if (tradingService.mqLoggedIn && mq != null) {
+          return _mqLoggedIn(context, mq);
         }
-        if (mq != null) return _mqLoggedIn(context, mq);
-        if (!tradingService.isLoggedIn) {
-          return const _LoggedOutHeader();
-        }
-        return _loggedIn(context);
+        if (tradingService.isLoggedIn) return _loggedIn(context);
+        return const _LoggedOutHeader();
       },
     );
   }
@@ -557,6 +554,8 @@ class _Header extends StatelessWidget {
   }
 
   Widget _loggedIn(BuildContext context) {
+    // FP Trades account ho to sidebar me FP ka logo, MT5 wala nahi.
+    final isFp = tradingService.session?.source == 'server';
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -565,12 +564,15 @@ class _Header extends StatelessWidget {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Image.asset(
-                'assets/icons/mt5_logo.png',
-                width: 30,
-                height: 30,
-                fit: BoxFit.contain,
-              ),
+              if (isFp)
+                const FpLogo(size: 30)
+              else
+                Image.asset(
+                  'assets/icons/mt5_logo.png',
+                  width: 30,
+                  height: 30,
+                  fit: BoxFit.contain,
+                ),
               SizedBox(width: 16),
               Expanded(
                 child: Column(

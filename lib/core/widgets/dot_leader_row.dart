@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../mt_colors.dart';
 
 class DotLeaderRow extends StatelessWidget {
-  DotLeaderRow({
+  const DotLeaderRow({
     super.key,
     required this.label,
     required this.value,
@@ -26,7 +26,7 @@ class DotLeaderRow extends StatelessWidget {
       color: MtColors.text,
       fontSize: fontSize,
       height: 1.15,
-      fontWeight: FontWeight.w400,
+      fontWeight: FontWeight.w700,
     );
     return Padding(
       padding: EdgeInsets.symmetric(vertical: verticalPadding),
@@ -68,10 +68,10 @@ class _DotPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()..color = const Color(0xFFC8C8C8);
-    final y = size.height / 2;
-    const gap = 3.6;
-    const radius = 0.85;
+    final paint = Paint()..color = const Color(0xFFD8D8D8);
+    const gap = 8.0;
+    const radius = 1.1;
+    final y = size.height - radius - 1;
     for (var x = radius; x <= size.width - radius; x += gap) {
       canvas.drawCircle(Offset(x, y), radius, paint);
     }

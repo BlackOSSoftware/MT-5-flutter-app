@@ -10,18 +10,27 @@ import 'mq_widgets.dart';
 /// asal trading session banta hai, WebSocket connect hota hai aur
 /// trades isi account se server par jate hain.
 class FpTradesPage extends StatefulWidget {
-  const FpTradesPage({super.key});
+  const FpTradesPage({super.key, this.initial});
+
+  /// Manage Accounts ke saved card se khola ho to login pehle se bhara.
+  final SavedFpAccount? initial;
 
   @override
   State<FpTradesPage> createState() => _FpTradesPageState();
 }
 
 class _FpTradesPageState extends State<FpTradesPage> {
-  String _server = 'FPTrades-Live';
+  late String _server = widget.initial?.isDemo ?? false
+      ? 'FPTrades-Demo'
+      : 'FPTrades-Live';
   bool _savePassword = true;
   bool _busy = false;
-  final _loginCtrl = TextEditingController();
-  final _passCtrl = TextEditingController();
+  late final _loginCtrl = TextEditingController(
+    text: widget.initial?.accountNumber ?? '',
+  );
+  late final _passCtrl = TextEditingController(
+    text: widget.initial?.password ?? '',
+  );
 
   @override
   void dispose() {
@@ -50,7 +59,7 @@ class _FpTradesPageState extends State<FpTradesPage> {
     setState(() => _busy = true);
     try {
       // FP Trades API login - asal session + live WebSocket.
-      await tradingService.login(login, pass);
+      await tradingService.login(login, pass, savePassword: _savePassword);
       if (mounted) {
         Navigator.of(context).popUntil((r) => r.isFirst);
       }

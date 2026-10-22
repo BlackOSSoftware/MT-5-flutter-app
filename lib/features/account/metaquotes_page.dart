@@ -46,8 +46,8 @@ class _MetaQuotesPageState extends State<MetaQuotesPage> {
         password: pass,
       );
       if (mounted) {
-        // For now the account only exists on the server (registered in
-        // Mongo); no trading session is started yet.
+        // Login ke saath is MQ account ka apna trading session chalu ho
+        // chuka hai (trades isi account pe jayenge).
         await showDialog<void>(
           context: context,
           builder: (ctx) => AlertDialog(

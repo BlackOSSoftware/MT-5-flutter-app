@@ -36,6 +36,8 @@ dependencies:
   cupertino_icons: ^1.0.8
   url_launcher: ^6.3.3
   shared_preferences: ^2.5.6
+  audioplayers: ^6.8.1
+  webview_flutter: ^4.14.1
 
 dev_dependencies:
   flutter_test:
@@ -62,6 +64,7 @@ flutter:
   assets:
     - assets/metaLogo.png
     - assets/icons/trade_candles.png
+    - assets/icons/order_done.png
     - assets/icons/quotes_arrows.png
     - assets/icons/messages_bubbles.png
     - assets/icons/header_edit.png
@@ -87,6 +90,21 @@ flutter:
     - assets/icons/trash_bin.png
     - assets/icons/select_all_checks.png
     - assets/icons/drag_bars.png
+    - assets/icons/period_today.png
+    - assets/icons/period_week.png
+    - assets/icons/period_month.png
+    - assets/icons/period_3months.png
+    - assets/icons/period_custom.png
+    - assets/icons/chart_crosshair.png
+    - assets/icons/chart_move.png
+    - assets/icons/chart_indicators.png
+    - assets/icons/chart_trade.png
+    - assets/icons/chart_one_click.png
+    - assets/icons/chart_sliders.png
+    - assets/icons/chart_objects.png
+    - assets/icons/chart_windows.png
+    - assets/sounds/success.mp3
+    - assets/sounds/error.mp3
 
   fonts:
     - family: Roboto

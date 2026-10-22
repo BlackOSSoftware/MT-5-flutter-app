@@ -289,7 +289,10 @@ void _showQuoteMenu(
             close();
             Navigator.of(context).push(
               MaterialPageRoute<void>(
-                builder: (_) => NewOrderPage(symbol: quote.symbol),
+                builder: (_) => NewOrderPage(
+                  symbol: quote.symbol,
+                  onOrderPlaced: () => shell.openTab(2),
+                ),
               ),
             );
           },
@@ -814,28 +817,6 @@ class _QuoteTile extends StatelessWidget {
   }
 }
 
-class _PriceColumn extends StatelessWidget {
-  _PriceColumn({required this.price, required this.label});
-
-  final Widget price;
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.end,
-      children: [
-        price,
-        SizedBox(height: 2),
-        Text(
-          label,
-          style: TextStyle(color: MtColors.iconDark, fontSize: 14, height: 1.1),
-        ),
-      ],
-    );
-  }
-}
-
 class _ThinAddIconPainter extends CustomPainter {
   const _ThinAddIconPainter(this.color);
 
@@ -856,4 +837,26 @@ class _ThinAddIconPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _ThinAddIconPainter oldDelegate) =>
       oldDelegate.color != color;
+}
+
+class _PriceColumn extends StatelessWidget {
+  _PriceColumn({required this.price, required this.label});
+
+  final Widget price;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        price,
+        SizedBox(height: 2),
+        Text(
+          label,
+          style: TextStyle(color: MtColors.iconDark, fontSize: 14, height: 1.1),
+        ),
+      ],
+    );
+  }
 }
