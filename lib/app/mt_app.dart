@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../core/app_update/app_update_gate.dart';
 import '../core/theme_controller.dart';
 import '../features/shell/main_shell.dart';
 import 'mt_theme.dart';
@@ -40,7 +41,7 @@ class MtApp extends StatelessWidget {
           darkTheme: MtTheme.dark,
           themeMode: isDark ? ThemeMode.dark : ThemeMode.light,
           scrollBehavior: const MtScrollBehavior(),
-          home: MainShell(key: ValueKey(isDark)),
+          home: AppUpdateGate(child: MainShell(key: ValueKey(isDark))),
         );
       },
     );
